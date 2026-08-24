@@ -1,0 +1,44 @@
+# Schema served by the GraphQL Function App.
+#
+# Every field runs against the caller's own database connection, so the rows
+# returned are whatever the RLS policy in Azure SQL decided the caller may see.
+
+type Query {
+  "Documents the signed-in user is entitled to read, filtered by RLS in Azure SQL."
+  documents(projectId: Int, take: Int! = 50): [Document!]!
+
+  "A single document by ID. Returns null if RLS filters it out."
+  document(documentId: Int!): Document
+
+  "How Azure SQL sees the caller: database principal, Entra object ID, synced group count."
+  myAccess: CallerContext
+}
+
+type Document {
+  documentId: Int!
+  projectId: Int!
+  projectName: String!
+  title: String!
+  body: String
+  "Entra group object ID required to read this row."
+  readGroupId: UUID!
+  "Entra group object ID required to change this row."
+  writeGroupId: UUID!
+  createdAt: DateTime!
+}
+
+type CallerContext {
+  "Database principal name on the connection."
+  databaseUser: String!
+  databasePrincipalId: Int!
+  "Entra object ID the database resolved for this principal."
+  userObjectId: UUID
+  "Group memberships currently synced for this user."
+  groupMembershipCount: Int!
+  "Rows visible to this caller after RLS filtering."
+  visibleDocumentCount: Int!
+  membershipSyncedAt: DateTime
+}
+
+scalar UUID
+scalar DateTime

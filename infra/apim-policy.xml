@@ -1,0 +1,62 @@
+<!--
+    APIM policy for both demo APIs.
+
+    The gateway does two jobs here. It rejects anything without a valid token,
+    so unauthenticated traffic never reaches the Function App. Then it hands the
+    same token onwards, unchanged, because that token is what will open the
+    Azure SQL connection further down.
+
+    __TENANT_ID__ is substituted by deploy.sh from the active az login session.
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- Wide open so the test page works from anywhere. Narrow this to your
+             own origins before using the pattern for anything real. -->
+        <cors allow-credentials="false">
+            <allowed-origins>
+                <origin>*</origin>
+            </allowed-origins>
+            <allowed-methods preflight-result-max-age="300">
+                <method>GET</method>
+                <method>POST</method>
+                <method>OPTIONS</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>*</header>
+            </allowed-headers>
+        </cors>
+
+        <!-- The audience is the SQL resource rather than an API of our own,
+             because this is the token Azure SQL itself will authenticate.
+             Health is left open so it can be probed without a token. -->
+        <choose>
+            <when condition="@(!context.Request.Url.Path.EndsWith("health", System.StringComparison.OrdinalIgnoreCase))">
+                <validate-jwt header-name="Authorization"
+                              failed-validation-httpcode="401"
+                              failed-validation-error-message="Unauthorized">
+                    <openid-config url="https://login.microsoftonline.com/__TENANT_ID__/.well-known/openid-configuration" />
+                    <audiences>
+                        <audience>https://database.windows.net/</audience>
+                    </audiences>
+                </validate-jwt>
+            </when>
+        </choose>
+
+        <!-- Forward the token to the backend. Nothing between the user and the
+             database asserts who the user is; the token speaks for itself. -->
+        <set-header name="X-SQL-ACCESS-TOKEN" exists-action="override">
+            <value>@(context.Request.Headers.GetValueOrDefault("Authorization","").Replace("Bearer ",""))</value>
+        </set-header>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
