@@ -31,6 +31,41 @@ and API Management with `./deploy.sh` when you want the full path.
 
 Requires the az CLI, the .NET SDK and `zip`. No `sqlcmd`.
 
+## Running the demo
+
+```bash
+cd infra
+./demo.sh
+```
+
+That prints who can read and write what, then runs the five enforcement tests.
+It sorts out the token, the config and the firewall on its own.
+
+```
+User                Groups  Readable  Writable
+------------------  ------  --------  --------
+admin                  253     12600        50
+demo-readwrite           2        50        50
+demo-readonly            1        50         0
+
+PASS  1. Alice sees 50 of 100000 rows (only her group).
+PASS  2. Bob has no memberships and sees 0 rows.
+PASS  3. BLOCK predicate stopped a write on a read-only row.
+PASS  4. Security schema is not directly readable by the app role.
+PASS  5. Deleting the membership row revoked access immediately.
+```
+
+The row worth pointing at is `demo-readonly`: 50 rows readable, none writable.
+Same table, same query, same application code.
+
+Other commands:
+
+| Command | Shows |
+| --- | --- |
+| `./demo.sh access` | who can read and write what |
+| `./demo.sh tests` | the five enforcement tests |
+| `./demo.sh bench` | logical reads and timings |
+
 ## What gets created
 
 In your subscription:
