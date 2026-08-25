@@ -4,7 +4,7 @@ using GraphqlServer.Models;
 namespace GraphqlServer.Services;
 
 /// <summary>
-/// Reads dbo.Documents over a connection authenticated with the caller's own
+/// Reads dbo.DocumentLine over a connection authenticated with the caller's own
 /// Entra token. No filtering happens here - every WHERE clause that matters is
 /// applied by the RLS policy inside Azure SQL.
 /// </summary>
@@ -34,18 +34,20 @@ public class SqlDataService
         return connection;
     }
 
-    public async Task<List<Document>> GetDocumentsAsync(string? accessToken, int? projectId = null, int take = 50)
+    public async Task<List<DocumentLine>> GetDocumentsAsync(string? accessToken, int? projectId = null, int take = 50)
     {
-        var documents = new List<Document>();
+        var documents = new List<DocumentLine>();
 
         await using var connection = await OpenAsync(accessToken);
         await using var command = new SqlCommand(
             @"SELECT TOP (@Take)
-                     DocumentId, ProjectId, ProjectName, Title, Body,
-                     ReadGroupId, WriteGroupId, CreatedAt
-              FROM dbo.Documents
-              WHERE (@ProjectId IS NULL OR ProjectId = @ProjectId)
-              ORDER BY DocumentId;", connection);
+                     l.DocumentLineId, l.DocumentId, l.ProjectId,
+                     d.DocumentName, l.Comment, pa.EntraIdWrite, l.CreatedAt
+              FROM dbo.DocumentLine AS l
+              JOIN dbo.Document      AS d  ON d.DocumentId = l.DocumentId
+              JOIN dbo.ProjectAccess AS pa ON pa.ProjectId = l.ProjectId
+              WHERE (@ProjectId IS NULL OR l.ProjectId = @ProjectId)
+              ORDER BY l.DocumentLineId;", connection);
 
         command.Parameters.AddWithValue("@Take", Math.Clamp(take, 1, MaxRows));
         command.Parameters.AddWithValue("@ProjectId", (object?)projectId ?? DBNull.Value);
@@ -59,14 +61,16 @@ public class SqlDataService
         return documents;
     }
 
-    public async Task<Document?> GetDocumentByIdAsync(int documentId, string? accessToken)
+    public async Task<DocumentLine?> GetDocumentByIdAsync(int documentId, string? accessToken)
     {
         await using var connection = await OpenAsync(accessToken);
         await using var command = new SqlCommand(
-            @"SELECT DocumentId, ProjectId, ProjectName, Title, Body,
-                     ReadGroupId, WriteGroupId, CreatedAt
-              FROM dbo.Documents
-              WHERE DocumentId = @DocumentId;", connection);
+            @"SELECT l.DocumentLineId, l.DocumentId, l.ProjectId,
+                     d.DocumentName, l.Comment, pa.EntraIdWrite, l.CreatedAt
+              FROM dbo.DocumentLine AS l
+              JOIN dbo.Document      AS d  ON d.DocumentId = l.DocumentId
+              JOIN dbo.ProjectAccess AS pa ON pa.ProjectId = l.ProjectId
+              WHERE l.DocumentLineId = @DocumentId;", connection);
 
         command.Parameters.AddWithValue("@DocumentId", documentId);
 
@@ -100,15 +104,14 @@ public class SqlDataService
         };
     }
 
-    private static Document Map(SqlDataReader reader) => new()
+    private static DocumentLine Map(SqlDataReader reader) => new()
     {
-        DocumentId   = reader.GetInt32(0),
-        ProjectId    = reader.GetInt32(1),
-        ProjectName  = reader.GetString(2),
-        Title        = reader.GetString(3),
-        Body         = reader.IsDBNull(4) ? null : reader.GetString(4),
-        ReadGroupId  = reader.GetGuid(5),
-        WriteGroupId = reader.GetGuid(6),
-        CreatedAt    = reader.GetDateTime(7)
+        DocumentLineId = reader.GetInt32(0),
+        DocumentId     = reader.GetInt32(1),
+        ProjectId      = reader.GetInt64(2),
+        DocumentName   = reader.GetString(3),
+        Comment        = reader.IsDBNull(4) ? null : reader.GetString(4),
+        WriteGroupId   = reader.GetGuid(5),
+        CreatedAt      = reader.GetDateTime(6)
     };
 }

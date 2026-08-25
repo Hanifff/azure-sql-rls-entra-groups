@@ -6,10 +6,6 @@
 #   ./deploy.sh --sql-only     # database only: schema, seed, verify, tests
 #   ./deploy.sh --skip-apim    # everything except APIM (30-45 min to provision)
 #   ./deploy.sh --only-apim    # APIM plus its APIs and policy
-#   ./deploy.sh --yes          # skip the confirmation prompt
-#
-# Run ./setup.sh in the repository root first. It asks for your subscription,
-# region and demo users and saves them to infra/.env.
 #
 # Requires the az CLI (logged in) and the .NET SDK. No sqlcmd: infra/sqlrunner
 # talks to Azure SQL directly with your Entra token.
@@ -21,14 +17,13 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./config.sh
 
-SKIP_APIM=false; ONLY_APIM=false; SQL_ONLY=false; ASSUME_YES=false
+SKIP_APIM=false; ONLY_APIM=false; SQL_ONLY=false
 for arg in "$@"; do
     case "$arg" in
         --skip-apim) SKIP_APIM=true ;;
         --only-apim) ONLY_APIM=true ;;
         --sql-only)  SQL_ONLY=true; SKIP_APIM=true ;;
-        --yes|-y)    ASSUME_YES=true ;;
-        -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,14p' "$0"; exit 0 ;;
         *) echo "Unknown flag: $arg"; exit 1 ;;
     esac
 done
@@ -42,27 +37,10 @@ az account set --subscription "$SUBSCRIPTION_ID"
 CURRENT_USER_OID=$(az ad signed-in-user show --query id -o tsv)
 SQL_FQDN="${SQL_SERVER_NAME}.database.windows.net"
 
-echo "Subscription   : $(az account show --query name -o tsv) ($SUBSCRIPTION_ID)"
-echo "Tenant         : $TENANT_ID"
-echo "Signed in as   : $SQL_ADMIN_UPN"
-echo "Region         : $LOCATION"
-echo "Resource group : $RESOURCE_GROUP"
-echo "Demo users     : ${DEMO_USER_READWRITE:-none} / ${DEMO_USER_READONLY:-none}"
-
-if [ "$ASSUME_YES" = false ]; then
-    echo
-    if [ "$SQL_ONLY" = true ]; then
-        echo "This creates an Azure SQL server and database. Small but not free."
-    else
-        echo "This creates billable resources. API Management Developer tier is the"
-        echo "expensive one; use --sql-only or --skip-apim to leave it out."
-    fi
-    read -r -p "Continue? [y/N]: " REPLY
-    case "$REPLY" in
-        [yY]|[yY][eE][sS]) ;;
-        *) echo "Nothing was created."; exit 0 ;;
-    esac
-fi
+echo "Subscription : $SUBSCRIPTION_ID"
+echo "Tenant       : $TENANT_ID"
+echo "Signed in as : $SQL_ADMIN_UPN"
+echo "Region       : $LOCATION"
 
 # ============================================================================
 # Database tier
@@ -143,28 +121,22 @@ fi
 # Without a non-admin identity there is nothing to see: the deployer is the
 # Entra admin and bypasses RLS.
 step "Demo users"
-RW_OID=""; RO_OID=""
-[ -n "$DEMO_USER_READWRITE" ] && RW_OID=$(az ad user show --id "$DEMO_USER_READWRITE" --query id -o tsv 2>/dev/null || true)
-[ -n "$DEMO_USER_READONLY" ]  && RO_OID=$(az ad user show --id "$DEMO_USER_READONLY"  --query id -o tsv 2>/dev/null || true)
-
-if [ -z "$DEMO_USER_READWRITE" ] && [ -z "$DEMO_USER_READONLY" ]; then
-    warn "no demo users configured, run ./setup.sh to name two"
-    warn "RLS and the tests still run; you just cannot show filtering over HTTP"
-fi
+RW_OID=$(az ad user show --id "$DEMO_USER_READWRITE" --query id -o tsv 2>/dev/null || true)
+RO_OID=$(az ad user show --id "$DEMO_USER_READONLY"  --query id -o tsv 2>/dev/null || true)
 
 if [ -n "$RW_OID" ] && [ "$USE_REAL_GROUPS" = true ]; then
     az ad group member add --group "$ALPHA_READ"  --member-id "$RW_OID" -o none 2>/dev/null || true
     az ad group member add --group "$ALPHA_WRITE" --member-id "$RW_OID" -o none 2>/dev/null || true
     ok "$DEMO_USER_READWRITE has read and write on project 1"
-elif [ -n "$DEMO_USER_READWRITE" ]; then
-    warn "read-write user not found in this directory: $DEMO_USER_READWRITE"
+else
+    warn "read-write demo user not found, skipping ($DEMO_USER_READWRITE)"
 fi
 
 if [ -n "$RO_OID" ] && [ "$USE_REAL_GROUPS" = true ]; then
     az ad group member add --group "$BETA_READ" --member-id "$RO_OID" -o none 2>/dev/null || true
     ok "$DEMO_USER_READONLY has read only on project 2"
-elif [ -n "$DEMO_USER_READONLY" ]; then
-    warn "read-only user not found in this directory: $DEMO_USER_READONLY"
+else
+    warn "read-only demo user not found, skipping ($DEMO_USER_READONLY)"
 fi
 
 # --- schema, policy, procedures, data ---------------------------------------
@@ -178,43 +150,30 @@ SQL_ACCESS_TOKEN=$(az account get-access-token --resource https://database.windo
 
 step "Schema, RLS policy and procedures"
 $RUNNER "$SQL_FQDN" "$SQL_DB_NAME" \
-    ./sql/01_schema.sql ./sql/02_rls_policy.sql ./sql/03_procedures.sql
+    ./sql/01_schema.sql ./sql/02_policy.sql ./sql/03_procedures.sql
 ok "applied"
 
-step "Seeding representative data"
-# The seed script reads these so the size can be changed without editing SQL.
+step "Seeding data"
+# The seed carries placeholders for the demo groups so the two example projects
+# resolve against real directory objects rather than generated GUIDs.
 SEED=$(mktemp /tmp/rls-seed-XXXXXX.sql)
-sed -e "s/{{PROJECT_COUNT}}/${PROJECT_COUNT}/g" \
-    -e "s/{{DOCUMENT_COUNT}}/${DOCUMENT_COUNT}/g" ./sql/04_seed_demo_data.sql > "$SEED"
+sed -e "s/__ALPHA_WRITE__/${ALPHA_WRITE:-$(uuidgen)}/" \
+    -e "s/__ALPHA_READ__/${ALPHA_READ:-$(uuidgen)}/" \
+    -e "s/__BETA_WRITE__/${BETA_WRITE:-$(uuidgen)}/" \
+    -e "s/__BETA_READ__/${BETA_READ:-$(uuidgen)}/" ./sql/04_seed.sql > "$SEED"
 $RUNNER "$SQL_FQDN" "$SQL_DB_NAME" "$SEED"
 rm -f "$SEED"
 ok "seeded"
 
-step "Registering demo identities"
+step "Registering identities"
 GEN_SQL=$(mktemp /tmp/rls-register-XXXXXX.sql)
 {
     echo "SET NOCOUNT ON;"
-    if [ "$USE_REAL_GROUPS" = true ]; then
-        cat <<SQL
--- Point projects 1 and 2 at the real Entra groups so the end-to-end token demo
--- resolves against the directory rather than synthetic IDs.
-UPDATE dbo.Projects SET ReadGroupId = '$ALPHA_READ', WriteGroupId = '$ALPHA_WRITE', IsRealEntraGroup = 1 WHERE ProjectId = 1;
-UPDATE dbo.Projects SET ReadGroupId = '$BETA_READ',  WriteGroupId = '$BETA_WRITE',  IsRealEntraGroup = 1 WHERE ProjectId = 2;
-GO
-ALTER SECURITY POLICY Security.DocumentAccessPolicy WITH (STATE = OFF);
-UPDATE d SET d.ReadGroupId = p.ReadGroupId, d.WriteGroupId = p.WriteGroupId
-FROM dbo.Documents d JOIN dbo.Projects p ON p.ProjectId = d.ProjectId
-WHERE d.ProjectId IN (1, 2);
-ALTER SECURITY POLICY Security.DocumentAccessPolicy WITH (STATE = ON);
-GO
-SQL
-    fi
     cat <<SQL
 EXEC Security.usp_RefreshUserIdentity;
 GO
--- The deployer is the Entra admin and therefore connects as dbo, which bypasses
--- RLS by design. Registering them against their real database principal makes
--- dbo.vw_MyAccess meaningful for them too.
+-- The deployer is the Entra admin and connects as dbo, which bypasses the
+-- policy by design. Registering them anyway keeps the access summary honest.
 DECLARE @oid UNIQUEIDENTIFIER = '$CURRENT_USER_OID';
 DECLARE @pid INT = DATABASE_PRINCIPAL_ID();
 DELETE FROM Security.GroupMembership WHERE UserObjectId = @oid;
@@ -225,23 +184,23 @@ SQL
     if [ "$USE_REAL_GROUPS" = true ]; then
         cat <<SQL
 INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES
-    (@oid, '$ALPHA_READ'), (@oid, '$ALPHA_WRITE'), (@oid, '$BETA_READ');
+    (@oid, '$ALPHA_WRITE'), (@oid, '$ALPHA_READ'), (@oid, '$BETA_READ');
 SQL
     fi
     cat <<'SQL'
--- Representative breadth: membership in a few hundred project read groups,
--- which is the realistic shape. Not membership in every group that exists.
+-- Representative breadth: write access on a few hundred projects, which is the
+-- realistic shape. Not membership in every group that exists.
 INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId)
-SELECT @oid, p.ReadGroupId
-FROM dbo.Projects p
-WHERE p.ProjectId BETWEEN 3 AND 252
+SELECT @oid, pa.EntraIdWrite
+FROM dbo.ProjectAccess pa
+WHERE pa.ProjectId BETWEEN 100001 AND 100250
   AND NOT EXISTS (SELECT 1 FROM Security.GroupMembership m
-                  WHERE m.UserObjectId = @oid AND m.GroupObjectId = p.ReadGroupId);
+                  WHERE m.UserObjectId = @oid AND m.GroupObjectId = pa.EntraIdWrite);
 GO
 SQL
 
-    # Non-admin demo users: create the database principal, grant the app role,
-    # then record the same memberships that were just set up in Entra.
+    # Non-admin demo users. Filtering is only observable when one of these signs
+    # in, because the deployer bypasses the policy.
     for PAIR in "${RW_OID}|${DEMO_USER_READWRITE}|rw" "${RO_OID}|${DEMO_USER_READONLY}|ro"; do
         IFS='|' read -r U_OID U_UPN U_KIND <<< "$PAIR"
         [ -z "$U_OID" ] && continue
@@ -257,18 +216,11 @@ DECLARE @u UNIQUEIDENTIFIER = '$U_OID';
 DELETE FROM Security.GroupMembership WHERE UserObjectId = @u;
 SQL
         if [ "$U_KIND" = "rw" ]; then
-            cat <<SQL
-INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId)
-VALUES (@u, '$ALPHA_READ'), (@u, '$ALPHA_WRITE');
-GO
-SQL
+            echo "INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES (@u, '$ALPHA_WRITE'), (@u, '$ALPHA_READ');"
         else
-            cat <<SQL
-INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId)
-VALUES (@u, '$BETA_READ');
-GO
-SQL
+            echo "INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES (@u, '$BETA_READ');"
         fi
+        echo "GO"
     done
 
     cat <<'SQL'
@@ -286,7 +238,7 @@ $RUNNER "$SQL_FQDN" "$SQL_DB_NAME" ./sql/05_verify.sql
 ok "verification passed"
 
 step "Running RLS enforcement tests"
-$RUNNER "$SQL_FQDN" "$SQL_DB_NAME" ./sql/06_test_rls.sql
+$RUNNER "$SQL_FQDN" "$SQL_DB_NAME" ./sql/06_test.sql
 ok "RLS tests passed"
 
 fi # ONLY_APIM

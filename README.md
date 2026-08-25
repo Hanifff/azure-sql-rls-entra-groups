@@ -170,46 +170,65 @@ index seek.
 Entra object ID. It exists because an RLS predicate must be `SCHEMABINDING` and
 therefore cannot read `sys.database_principals`.
 
-**`Security.fn_rowaccess`** is the predicate:
+**`Security.fn_can_write_project`** is the predicate:
 
 ```sql
-CREATE FUNCTION Security.fn_rowaccess (@group_id UNIQUEIDENTIFIER)
+CREATE FUNCTION Security.fn_can_write_project (@ProjectId BIGINT)
 RETURNS TABLE
 WITH SCHEMABINDING
 AS
 RETURN
-    SELECT 1 AS fn_rowaccess_result
+    SELECT 1 AS allowed
     WHERE EXISTS (
         SELECT 1
-        FROM Security.UserIdentity AS u
-        INNER JOIN Security.GroupMembership AS m ON m.UserObjectId = u.UserObjectId
-        WHERE u.DatabasePrincipalId = DATABASE_PRINCIPAL_ID()
-          AND m.GroupObjectId = @group_id
+        FROM dbo.ProjectAccess              AS pa
+        INNER JOIN Security.GroupMembership AS gm ON gm.GroupObjectId = pa.EntraIdWrite
+        INNER JOIN Security.UserIdentity    AS ui ON ui.UserObjectId  = gm.UserObjectId
+        WHERE pa.ProjectId = @ProjectId
+          AND ui.DatabasePrincipalId = DATABASE_PRINCIPAL_ID()
     );
+```
+
+The chain it walks:
+
+```
+row.ProjectId -> ProjectAccess.EntraIdWrite -> GroupMembership -> caller
 ```
 
 `DATABASE_PRINCIPAL_ID()` is the identity on the authenticated connection. The
 application cannot set it, forge it or pass it.
 
-The policy binds it twice:
+The policy binds it to every write path:
 
 ```sql
-CREATE SECURITY POLICY Security.DocumentAccessPolicy
-    ADD FILTER PREDICATE Security.fn_rowaccess(ReadGroupId)   ON dbo.Documents,
-    ADD BLOCK  PREDICATE Security.fn_rowaccess(WriteGroupId)  ON dbo.Documents AFTER INSERT,
-    ADD BLOCK  PREDICATE Security.fn_rowaccess(WriteGroupId)  ON dbo.Documents BEFORE UPDATE,
-    ADD BLOCK  PREDICATE Security.fn_rowaccess(WriteGroupId)  ON dbo.Documents AFTER UPDATE,
-    ADD BLOCK  PREDICATE Security.fn_rowaccess(WriteGroupId)  ON dbo.Documents BEFORE DELETE
+CREATE SECURITY POLICY Security.ProjectLinePolicy
+    ADD BLOCK PREDICATE Security.fn_can_write_project(ProjectId) ON dbo.DocumentLine AFTER INSERT,
+    ADD BLOCK PREDICATE Security.fn_can_write_project(ProjectId) ON dbo.DocumentLine BEFORE UPDATE,
+    ADD BLOCK PREDICATE Security.fn_can_write_project(ProjectId) ON dbo.DocumentLine AFTER UPDATE,
+    ADD BLOCK PREDICATE Security.fn_can_write_project(ProjectId) ON dbo.DocumentLine BEFORE DELETE
 WITH (STATE = ON, SCHEMABINDING = ON);
 ```
 
-A FILTER predicate controls reads and does nothing about writes. Without BLOCK, a
-user can modify rows they are only entitled to read.
+`BEFORE UPDATE` and `AFTER UPDATE` are both required. Without the first, a user
+could move a row out of a project they control. Without the second, into one they
+do not.
 
-Callers hold the `rls_app_user` role, which is granted access to the data and
-denied access to the `Security` schema. The predicate still reads those tables,
-because a schema-bound predicate does not require the caller to hold permission
-on what it references.
+Reads are open by default and handled by table-level permissions. A read
+predicate exists and can be switched on with `./demo.sh read on` if rows need
+read restrictions too.
+
+`SCHEMABINDING` is not optional. `CREATE SECURITY POLICY` rejects a predicate
+function that was not created with it:
+
+```
+Cannot schema bind security policy. Function is not schema bound.
+```
+
+That is also what makes the permission model work. Callers hold the
+`rls_app_user` role, which is granted the data and explicitly denied the
+`Security` schema. The predicate still reads those tables, because a schema-bound
+predicate does not require the caller to hold permission on what it references.
+Without it, every user would need read access to the entitlement data.
 
 ## The sync job
 
@@ -290,6 +309,55 @@ for. It fails on the prerequisite rather than the syntax: it only resolves group
 that already exist as database principals.
 
 It remains the right tool for a small, stable set of groups.
+
+### Why the principals are the problem, not the row count
+
+The membership table holds far more rows than there would be principals. Rows are
+the cheaper thing by a wide margin, because the two are different in kind.
+
+| | One principal per group | Rows in a table |
+| --- | --- | --- |
+| What it is | Schema object, DDL | Data, DML |
+| Initial load | One `CREATE USER` each, every one a Graph lookup | One bulk insert |
+| Ongoing change | `DROP` and `CREATE` per directory change | Set-based update |
+| Permission to maintain | DDL rights in production, plus Graph read | `db_datawriter` on one schema |
+| Per database | Repeated in full | Repeated, but only data |
+| Name collisions | Certain. Entra allows duplicate display names, SQL does not | None, keyed on object IDs |
+| Group renamed in Entra | Silently stops matching | No effect, IDs do not change |
+| Usable by an index | No | Yes |
+
+A sync job is required either way. Groups are created, renamed and deleted
+continuously, and something has to reflect that in the database. The only
+question is whether that job emits `CREATE USER` and `DROP USER`, or `INSERT` and
+`DELETE`.
+
+A million rows load in seconds and update set-based. A hundred thousand
+principals is a permanent DDL pipeline holding elevated rights in production.
+
+### What the login token does and does not give you
+
+`sys.login_token` lists the caller's Entra groups, including ones that are not
+database principals, so the membership information is genuinely present at login.
+Two things prevent it being the answer.
+
+It stores SIDs, not names. `IS_MEMBER` matches by name, which is precisely why
+the `CREATE USER` step exists: it supplies the name-to-SID mapping. Matching on
+object IDs instead avoids needing it at all.
+
+And it cannot be used in a predicate. Schema binding forbids system objects:
+
+```
+Cannot schema bind table valued function because it references
+system object 'sys.login_token'.
+```
+
+Copying the token into a real table at session start does work, but it keys on
+`@@SPID`, which Azure SQL reuses after a disconnect. A session that fails to
+clear and repopulate leaves the next caller holding the previous caller's groups.
+That fails open, so it is not suitable for a security control.
+
+Outside RLS, in a stored procedure or ordinary query, `sys.login_token` is a
+perfectly good replacement for `IS_MEMBER` and needs no principals.
 
 ### Limits
 

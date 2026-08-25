@@ -11,7 +11,7 @@ namespace GraphqlServer.GraphQL;
 public class Query
 {
     [GraphQLDescription("Documents the signed-in user is entitled to read, filtered by RLS in Azure SQL.")]
-    public async Task<List<Document>> GetDocuments(
+    public async Task<List<DocumentLine>> GetDocuments(
         [Service] SqlDataService dataService,
         [Service] ITokenAccessor tokenAccessor,
         int? projectId = null,
@@ -22,7 +22,7 @@ public class Query
     }
 
     [GraphQLDescription("A single document by ID. Returns null if RLS filters it out.")]
-    public async Task<Document?> GetDocument(
+    public async Task<DocumentLine?> GetDocument(
         int documentId,
         [Service] SqlDataService dataService,
         [Service] ITokenAccessor tokenAccessor)

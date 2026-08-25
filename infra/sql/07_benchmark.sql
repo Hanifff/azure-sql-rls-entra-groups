@@ -1,17 +1,16 @@
 -- ============================================================================
 -- 07_benchmark.sql
--- Measures the RLS predicate at demo scale so the design can be defended with
--- numbers instead of assertions.
+-- Measures what the predicate costs, so the design can be defended with numbers
+-- rather than assertions.
 --
--- Creates a test principal with a realistic membership count (a few hundred
--- groups, not tens of thousands), then reports logical reads and elapsed time
--- for the queries an application would actually run.
+-- Writes are the interesting case here, because the policy only restricts
+-- writes. A write predicate is evaluated one row at a time, which is why it
+-- stays cheap regardless of table size. Reads are measured too, for the case
+-- where read filtering is switched on.
 --
 -- Cleans up after itself.
 -- ============================================================================
 SET NOCOUNT ON;
-
-DECLARE @MembershipCount INT = 250;   -- groups this test user belongs to
 
 IF DATABASE_PRINCIPAL_ID('rls_bench_user') IS NOT NULL DROP USER rls_bench_user;
 GO
@@ -21,7 +20,7 @@ ALTER ROLE rls_app_user ADD MEMBER rls_bench_user;
 GO
 
 DECLARE @benchOid UNIQUEIDENTIFIER = '33333333-3333-3333-3333-333333333333';
-DECLARE @MembershipCount INT = 250;
+DECLARE @MembershipCount INT = 250;   -- a realistic number of groups for one user
 
 DELETE FROM Security.GroupMembership WHERE UserObjectId = @benchOid;
 DELETE FROM Security.UserIdentity    WHERE UserObjectId = @benchOid;
@@ -30,30 +29,24 @@ INSERT INTO Security.UserIdentity (DatabasePrincipalId, UserObjectId, UserPrinci
 VALUES (DATABASE_PRINCIPAL_ID('rls_bench_user'), @benchOid, N'bench@test.local');
 
 INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId)
-SELECT TOP (@MembershipCount) @benchOid, ReadGroupId
-FROM dbo.Projects
+SELECT TOP (@MembershipCount) @benchOid, EntraIdWrite
+FROM dbo.ProjectAccess
 ORDER BY ProjectId;
 GO
 
--- --- context ----------------------------------------------------------------
 DECLARE @benchOid UNIQUEIDENTIFIER = '33333333-3333-3333-3333-333333333333';
-DECLARE @docs INT, @groups INT, @members INT, @visible INT;
+DECLARE @lines INT, @projects INT, @members INT;
 
-SELECT @docs    = COUNT(*) FROM dbo.Documents;
-SELECT @groups  = COUNT(DISTINCT ReadGroupId) FROM dbo.Documents;
-SELECT @members = COUNT(*) FROM Security.GroupMembership WHERE UserObjectId = @benchOid;
-
-EXECUTE AS USER = 'rls_bench_user';
-    SELECT @visible = COUNT(*) FROM dbo.Documents;
-REVERT;
+SELECT @lines    = COUNT(*) FROM dbo.DocumentLine;
+SELECT @projects = COUNT(*) FROM dbo.ProjectAccess;
+SELECT @members  = COUNT(*) FROM Security.GroupMembership WHERE UserObjectId = @benchOid;
 
 PRINT '============================================================';
-PRINT 'RLS predicate benchmark';
+PRINT 'Predicate benchmark';
 PRINT '============================================================';
-PRINT CONCAT('Documents in table          : ', @docs);
-PRINT CONCAT('Distinct read groups        : ', @groups);
+PRINT CONCAT('Lines in table              : ', @lines);
+PRINT CONCAT('Projects                    : ', @projects);
 PRINT CONCAT('Groups this user belongs to : ', @members);
-PRINT CONCAT('Rows visible to this user   : ', @visible);
 PRINT '';
 GO
 
@@ -61,28 +54,34 @@ SET STATISTICS IO ON;
 SET STATISTICS TIME ON;
 GO
 
-PRINT '--- Query 1: paged list, the common API call ---------------';
+PRINT '--- Write: single insert into a permitted project -----------';
 GO
+DECLARE @p BIGINT = (SELECT TOP 1 pa.ProjectId
+                     FROM dbo.ProjectAccess pa
+                     JOIN Security.GroupMembership gm ON gm.GroupObjectId = pa.EntraIdWrite
+                     WHERE gm.UserObjectId = '33333333-3333-3333-3333-333333333333'
+                     ORDER BY pa.ProjectId);
 EXECUTE AS USER = 'rls_bench_user';
-SELECT TOP (50) DocumentId, ProjectId, Title
-FROM dbo.Documents
-ORDER BY DocumentId;
+INSERT INTO dbo.DocumentLine (DocumentId, ProjectId, Comment)
+VALUES (21, @p, N'bench: single insert');
 REVERT;
 GO
 
-PRINT '--- Query 2: single row by primary key ---------------------';
+PRINT '--- Read: paged list, the common API call -------------------';
 GO
 EXECUTE AS USER = 'rls_bench_user';
-SELECT DocumentId, ProjectId, Title
-FROM dbo.Documents
-WHERE DocumentId = 1;
+SELECT TOP (50) DocumentLineId, ProjectId, Comment
+FROM dbo.DocumentLine
+ORDER BY DocumentLineId;
 REVERT;
 GO
 
-PRINT '--- Query 3: full count across everything visible ----------';
+PRINT '--- Read: single row by primary key -------------------------';
 GO
 EXECUTE AS USER = 'rls_bench_user';
-SELECT COUNT(*) AS VisibleDocuments FROM dbo.Documents;
+SELECT DocumentLineId, ProjectId, Comment
+FROM dbo.DocumentLine
+WHERE DocumentLineId = 1;
 REVERT;
 GO
 
@@ -90,7 +89,7 @@ SET STATISTICS IO OFF;
 SET STATISTICS TIME OFF;
 GO
 
--- --- cleanup ----------------------------------------------------------------
+DELETE FROM dbo.DocumentLine WHERE Comment LIKE N'bench:%';
 DECLARE @benchOid UNIQUEIDENTIFIER = '33333333-3333-3333-3333-333333333333';
 DELETE FROM Security.GroupMembership WHERE UserObjectId = @benchOid;
 DELETE FROM Security.UserIdentity    WHERE UserObjectId = @benchOid;

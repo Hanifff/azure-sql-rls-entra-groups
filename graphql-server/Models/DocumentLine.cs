@@ -1,17 +1,17 @@
 namespace GraphqlServer.Models;
 
 /// <summary>
-/// A row in dbo.Documents. ReadGroupId/WriteGroupId are Entra group object IDs;
-/// they are returned so the demo can show which group granted access.
+/// A row in dbo.DocumentLine. The row carries a ProjectId; the Entra group that
+/// governs writing it is reached through dbo.ProjectAccess. WriteGroupId is
+/// returned so the demo can show which group granted access.
 /// </summary>
-public class Document
+public class DocumentLine
 {
+    public int DocumentLineId { get; set; }
     public int DocumentId { get; set; }
-    public int ProjectId { get; set; }
-    public string ProjectName { get; set; } = string.Empty;
-    public string Title { get; set; } = string.Empty;
-    public string? Body { get; set; }
-    public Guid ReadGroupId { get; set; }
+    public long ProjectId { get; set; }
+    public string DocumentName { get; set; } = string.Empty;
+    public string? Comment { get; set; }
     public Guid WriteGroupId { get; set; }
     public DateTime CreatedAt { get; set; }
 }
