@@ -294,6 +294,21 @@ user inherit a deleted user's entitlements. The Entra object ID is the safer key
 
 ## Design decisions
 
+### The four ways to resolve membership
+
+Azure SQL cannot query Entra during a statement, so membership has to already be in
+the database. There are four ways to get it there.
+
+| # | Option | Principals per group | Any group | Freshness | Usable in a predicate |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Synced membership table | None | Yes | Sync interval | Yes |
+| 2 | `IS_MEMBER` with a principal per group | One each | Registered only | Connection open | Yes |
+| 3 | Identity passed by the application | None | Yes | Per request | Yes |
+| 4 | `sys.login_token` snapshot | None | Yes | Connection open | No |
+
+This repository implements option 1. Full pros and cons, with measured numbers, are in
+[docs/resolving-entra-group-membership.md](docs/resolving-entra-group-membership.md).
+
 ### Why not `IS_MEMBER()`
 
 | | `IS_MEMBER()` | Membership table |
