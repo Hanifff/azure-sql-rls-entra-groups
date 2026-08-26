@@ -1,18 +1,18 @@
 -- ============================================================================
--- 10_project_model_schema.sql
+-- 01_schema.sql
 --
--- The customer's model, as drawn:
+-- The model:
 --
 --   Document        master list of documents
---   ProjectAccess   ProjectId -> the Entra groups that may read and write it
---                   (they already sync this from their IAM system)
+--   ProjectAccess   ProjectId -> the Entra groups that may read and write it,
+--                   synced from an IAM system
 --   DocumentLine    the protected table. Rows carry a ProjectId, not a group.
---   GroupMembership which users are in which groups. This is the piece that
---                   does not exist yet, and the reason the database cannot
---                   currently answer their question.
+--   GroupMembership which users are in which groups. This is the piece that is
+--                   usually missing, and the reason the database cannot answer
+--                   the membership question on its own.
 --
--- Note the shape difference from the other model in this repo: the group is
--- reached through the project, not stored on the row. So the predicate joins.
+-- Note the shape: the group is reached through the project rather than stored
+-- on the row, so the predicate joins instead of comparing a column.
 --
 -- Idempotent.
 -- ============================================================================
@@ -40,7 +40,7 @@ GO
 --
 -- Groups are stored as object IDs. If the source system supplies display names
 -- instead, this column changes type and IS_MEMBER becomes an option; see
--- 11_project_model_policy.sql for what that would look like.
+-- 02_policy.sql for what that would look like.
 -- ----------------------------------------------------------------------------
 IF OBJECT_ID('dbo.ProjectAccess', 'U') IS NULL
 BEGIN

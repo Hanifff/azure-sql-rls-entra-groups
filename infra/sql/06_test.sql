@@ -1,11 +1,11 @@
 -- ============================================================================
--- 13_project_model_test.sql
+-- 06_test.sql
 --
 -- Proves the write check works, using throwaway WITHOUT LOGIN users so it runs
 -- deterministically on every deploy without needing real Entra accounts.
 --
 -- Asserts:
---   1. everyone can read every line          (the diagram's rule)
+--   1. everyone can read every line          (reads are open by default)
 --   2. a member of the write group can insert into that project
 --   3. a non-member cannot insert into that project
 --   4. a member of one project cannot insert into another

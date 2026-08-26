@@ -1,7 +1,7 @@
 -- ============================================================================
--- 16_project_model_demo_run.sql
+-- 11_demo_run.sql
 --
--- The demo, as one narrated script. Run it after 15_..._demo_setup.sql.
+-- The demo, as one narrated script. Run it after 10_demo_setup.sql.
 --
 -- Each step prints what it is about to do and what happened, so it can be run
 -- top to bottom while talking, or a section at a time by highlighting it.

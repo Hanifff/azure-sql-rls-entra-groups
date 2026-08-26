@@ -3,8 +3,8 @@
 --
 -- Two layers of data.
 --
--- The first is the customer's example from their diagram, so the demo opens on
--- something they recognise. Documents 21 and 42, projects 12345678 and 98765432.
+-- The first is a small worked example, so the demo opens on something legible.
+-- Documents 21 and 42, projects 12345678 and 98765432.
 --
 -- The second is scale: enough projects and lines for the behaviour and the
 -- numbers to mean something. Group IDs there are synthetic, because the
@@ -15,7 +15,7 @@
 -- Idempotent.
 -- ============================================================================
 
-DECLARE @ExtraProjects INT = {{PROJECT_COUNT}};   -- in addition to the two from the diagram
+DECLARE @ExtraProjects INT = {{PROJECT_COUNT}};   -- in addition to the two above
 DECLARE @ExtraLines    INT = {{DOCUMENT_COUNT}};
 
 IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = 'ProjectLinePolicy')
@@ -28,7 +28,7 @@ DELETE FROM dbo.Document;
 DBCC CHECKIDENT ('dbo.DocumentLine', RESEED, 0) WITH NO_INFOMSGS;
 GO
 
--- --- the customer's example, exactly as drawn --------------------------------
+-- --- the worked example ------------------------------------------------------
 INSERT INTO dbo.Document (DocumentId, DocumentName) VALUES
     (21, N'NS_123'),
     (42, N'TEK17');
@@ -44,7 +44,7 @@ INSERT INTO dbo.DocumentLine (DocumentId, ProjectId, Comment) VALUES
     (21, 12345678, N'Connection made!'),
     (42, 98765432, N'Hello world');
 
-PRINT '  Seeded the diagram example: 2 documents, 2 projects, 2 lines';
+PRINT '  Seeded the worked example: 2 documents, 2 projects, 2 lines';
 GO
 
 -- --- scale -------------------------------------------------------------------

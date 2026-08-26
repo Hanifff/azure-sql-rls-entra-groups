@@ -1,5 +1,5 @@
 -- ============================================================================
--- 15_project_model_demo_setup.sql
+-- 10_demo_setup.sql
 --
 -- Puts the database into a known state for a live demo, and creates two named
 -- users so the story is easy to follow:
@@ -10,7 +10,7 @@
 -- Both are WITHOUT LOGIN principals, so nothing in Entra is touched and the
 -- demo works the same in any tenant.
 --
--- Run 16_project_model_demo_run.sql afterwards to walk through the story.
+-- Run 11_demo_run.sql afterwards to walk through the story.
 -- Safe to re-run: it resets everything first.
 -- ============================================================================
 SET NOCOUNT ON;

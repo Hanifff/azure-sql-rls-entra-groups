@@ -1,12 +1,12 @@
 -- ============================================================================
--- 14_project_model_toggle_read.sql
+-- 09_toggle_read.sql
 --
 -- Switches read filtering on or off, live, so the difference can be shown in a
 -- meeting rather than described.
 --
--- The diagram says everyone reads everything. The original email described a
--- read group per row. Nobody has resolved that yet, so both behaviours are
--- available and the demo can flip between them in a second.
+-- Reads are open by default and handled by table permissions. Where they also
+-- need restricting per project, this binds the read predicate to the same
+-- policy. Both behaviours are available so the demo can flip in a second.
 --
 -- Usage: set @EnableReadFiltering below, then run.
 -- ============================================================================

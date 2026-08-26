@@ -1,17 +1,15 @@
 -- ============================================================================
--- 11_project_model_policy.sql
+-- 02_policy.sql
 --
--- Two predicates, because the customer has told us two different things and
--- both need to be demonstrable:
+-- Two predicates, because read policy varies by deployment and both need to
+-- be demonstrable:
 --
 --   write   BLOCK on DocumentLine, member of ProjectAccess.EntraIdWrite.
---           This is what the diagram asks for.
+--           Always on.
 --
 --   read    FILTER on DocumentLine, member of ProjectAccess.EntraIdRead.
---           The diagram says everyone reads everything, but the original
---           email described a read group per row. Both are built. Read
---           filtering is OFF by default, matching the diagram.
---           Switch it with 14_project_model_toggle_read.sql.
+--           Off by default, so reads are handled by table permissions.
+--           Switch it on with 09_toggle_read.sql.
 --
 -- Idempotent.
 -- ============================================================================
@@ -88,7 +86,7 @@ RETURN
 GO
 
 -- ----------------------------------------------------------------------------
--- Default policy: writes restricted, reads open. This matches the diagram.
+-- Default policy: writes restricted, reads open.
 --
 -- BLOCK covers every write path. Without BEFORE UPDATE a user could move a row
 -- out of a project they control; without AFTER UPDATE they could move one into
