@@ -39,10 +39,24 @@ SQL_FQDN="${SQL_SERVER_NAME}.database.windows.net"
 run() { dotnet ./sqlrunner/bin/Release/net8.0/sqlrunner.dll "$SQL_FQDN" "$SQL_DB_NAME" "$@"; }
 
 # A changed IP is the most common reason this fails, so fix it rather than
-# reporting it.
+# reporting it. Governance policy in some subscriptions also re-disables public
+# network access on the server without warning, so check that too.
 ensure_connectivity() {
     local probe; probe=$(mktemp /tmp/probe-XXXX.sql)
     echo "SELECT 1 AS ok;" > "$probe"
+
+    if run "$probe" >/dev/null 2>&1; then rm -f "$probe"; return 0; fi
+
+    local access
+    access=$(az sql server show -g "$RESOURCE_GROUP" -n "$SQL_SERVER_NAME" \
+             --query publicNetworkAccess -o tsv 2>/dev/null)
+    if [ "$access" = "Disabled" ]; then
+        warn "public network access was disabled on the server, re-enabling"
+        az sql server update -g "$RESOURCE_GROUP" -n "$SQL_SERVER_NAME" \
+            --enable-public-network true -o none 2>/dev/null
+        sleep 10
+    fi
+
     if ! run "$probe" >/dev/null 2>&1; then
         warn "cannot connect, updating the firewall for your current IP"
         local ip; ip=$(curl -fsS https://ifconfig.me 2>/dev/null)
@@ -52,6 +66,8 @@ ensure_connectivity() {
         sleep 8
         run "$probe" >/dev/null 2>&1 || { rm -f "$probe"; die "still cannot connect to $SQL_FQDN"; }
         ok "firewall updated for $ip"
+    else
+        ok "public network access restored"
     fi
     rm -f "$probe"
 }
