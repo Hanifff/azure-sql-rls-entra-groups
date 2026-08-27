@@ -1,7 +1,8 @@
 # Row-level authorization in Azure SQL driven by Microsoft Entra groups
 
-> **Guidance, not a production-ready setup.** Adapt, harden and test it for your
-> own environment before relying on it.
+> [!NOTE]
+> Guidance, not a production-ready setup. Adapt, harden and test it for your own
+> environment before relying on it.
 
 Rows reference a Microsoft Entra security group. The database decides who may read
 and write each row, not the application.
