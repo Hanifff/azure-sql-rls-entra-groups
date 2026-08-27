@@ -151,32 +151,65 @@ be traced before anything runs.
 
 ### 4. Optional, add the APIs and gateway
 
+The database and `./demo.sh` are enough to show row-level security. To show the
+whole path, from a signed-in user through a gateway and an API into the database,
+deploy everything:
+
 ```bash
 ./deploy.sh
 ```
 
-Adds both Function Apps and API Management. APIM takes 30 to 45 minutes to
-provision on first create and is the expensive part.
+Adds storage, an App Service plan, Application Insights, both Function Apps and API
+Management. **APIM takes 30 to 45 minutes to provision on first create** and is by
+far the most expensive resource, so start it early and tear it down afterwards.
 
 ```bash
 source ./config.sh
+GATEWAY="https://${APIM_NAME}.azure-api.net"
 TOKEN=$(az account get-access-token \
     --resource https://database.windows.net --query accessToken -o tsv)
-GATEWAY="https://${APIM_NAME}.azure-api.net"
-
-curl -s "$GATEWAY/rest/health"
-curl -s "$GATEWAY/rest/my-access"  -H "Authorization: Bearer $TOKEN"
-curl -s "$GATEWAY/rest/documents"  -H "Authorization: Bearer $TOKEN"
 ```
 
-| Request | Expected |
-| --- | --- |
-| `/rest/health` without a token | 200 |
-| `/rest/documents` without a token | 401, rejected at the gateway |
-| `/rest/documents` with a token | 200, filtered by RLS |
+The gateway rejects unauthenticated traffic before it reaches the function app:
 
-`my-access` reports how the database identified you: database principal, Entra
-object ID, synced group count, and how many rows you can see.
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$GATEWAY/rest/health"
+curl -s -o /dev/null -w '%{http_code}\n' "$GATEWAY/rest/documents"
+curl -s -o /dev/null -w '%{http_code}\n' "$GATEWAY/rest/documents" -H "Authorization: Bearer $TOKEN"
+```
+
+| Request | Expected | Why |
+| --- | --- | --- |
+| `/rest/health` without a token | 200 | Health is deliberately open |
+| `/rest/documents` without a token | 401 | Rejected at the gateway, never reaches the function |
+| `/rest/documents` with a token | 200 | Reaches the database, which decides the rows |
+
+Then show how the database identified the caller:
+
+```bash
+curl -s "$GATEWAY/rest/my-access" -H "Authorization: Bearer $TOKEN"
+```
+
+It returns the database principal, the Entra object ID, the synced group count and
+how many rows are visible. The point to make out loud is that the API sent no
+identity and no group membership. It forwarded a token, and the database worked out
+the rest.
+
+The same thing through GraphQL, whose queries are `documents`, `document(id:)` and
+`myAccess`:
+
+```bash
+curl -s "$GATEWAY/graphql" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ myAccess { databaseUser groupMembershipCount visibleDocumentCount } }"}'
+```
+
+Two API styles, no filtering logic in either, identical results.
+
+As the Entra admin you connect as `dbo`, which bypasses the policy by design, so
+`my-access` reports every row. That is correct rather than a bug, but it means the
+API path does not demonstrate filtering unless you call it as a non-admin. Use the
+API to show the token flow and the gateway, and `./demo.sh` to show the rows.
 
 ### 5. Tear it down
 
