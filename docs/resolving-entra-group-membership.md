@@ -186,8 +186,8 @@ FROM sys.login_token WHERE type = 'WINDOWS GROUP';
 
 ```
 oid                                   type           usage
-2ED2D8F6-7699-420A-A090-9F4139F3B2E1  WINDOWS GROUP  DENY ONLY
-C3A6DB5E-DC48-47DD-994F-B856AEBD22E4  WINDOWS GROUP  DENY ONLY
+11111111-2222-3333-4444-555555555555  WINDOWS GROUP  DENY ONLY
+66666666-7777-8888-9999-aaaaaaaaaaaa  WINDOWS GROUP  DENY ONLY
 ```
 
 Those are object IDs in exactly the form `ProjectAccess.EntraIdWrite` stores. No

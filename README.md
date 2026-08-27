@@ -1,11 +1,20 @@
 # Row-level authorization in Azure SQL driven by Microsoft Entra groups
 
 > [!WARNING]
-> **This is a baseline, not production guidance.**
-> It exists to demonstrate a pattern and to make the trade-offs measurable. It has
-> not been reviewed for your data classification, threat model, compliance
-> obligations, availability targets or scale. You are responsible for adapting,
-> hardening and testing it for your own environment before relying on it.
+> **This is a reference implementation, not production guidance.**
+>
+> Its purpose is to compare the ways Azure SQL can resolve Entra group membership
+> and to make the trade-offs measurable, particularly at group counts where the
+> obvious approach stops scaling. The measurements are real and were taken against
+> a live database, but they come from one workload on the cheapest available tier.
+>
+> It has not been reviewed for your data classification, threat model, compliance
+> obligations, availability targets or scale. Treat it as a starting point for a
+> design discussion, not as something to deploy and rely on. Adapting, hardening
+> and testing it for your own environment is your responsibility.
+>
+> The options, with pros and cons for each, are in
+> [docs/resolving-entra-group-membership.md](docs/resolving-entra-group-membership.md).
 
 Rows reference a Microsoft Entra security group. The database decides who may read
 and write each row, not the application.
@@ -570,4 +579,4 @@ Everything is tagged with `application`, `costCenter`, `criticality`,
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+BSD 2-Clause. See [LICENSE](LICENSE).
