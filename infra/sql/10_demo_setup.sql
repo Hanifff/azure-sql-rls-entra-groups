@@ -28,6 +28,7 @@ GO
 DECLARE @annaOid  UNIQUEIDENTIFIER = '0a0a0a0a-0000-0000-0000-00000000000a';
 DECLARE @bjornOid UNIQUEIDENTIFIER = '0b0b0b0b-0000-0000-0000-00000000000b';
 DECLARE @p1Write  UNIQUEIDENTIFIER = (SELECT EntraIdWrite FROM dbo.ProjectAccess WHERE ProjectId = 12345678);
+DECLARE @p1Read   UNIQUEIDENTIFIER = (SELECT EntraIdRead  FROM dbo.ProjectAccess WHERE ProjectId = 12345678);
 
 DELETE FROM Security.GroupMembership WHERE UserObjectId IN (@annaOid, @bjornOid);
 DELETE FROM Security.UserIdentity    WHERE UserObjectId IN (@annaOid, @bjornOid);
@@ -36,8 +37,12 @@ INSERT INTO Security.UserIdentity (DatabasePrincipalId, UserObjectId, UserPrinci
     (DATABASE_PRINCIPAL_ID('anna'),  @annaOid,  N'anna@contoso.com'),
     (DATABASE_PRINCIPAL_ID('bjorn'), @bjornOid, N'bjorn@contoso.com');
 
--- This single row is the entire difference between the two users.
-INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES (@annaOid, @p1Write);
+-- These two rows are the entire difference between the two users. The read row
+-- is inert until read filtering is switched on with 09_toggle_read.sql; without
+-- it, enabling read filtering would show anna zero rows rather than her project.
+INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES
+    (@annaOid, @p1Write),
+    (@annaOid, @p1Read);
 
 -- Remove anything left behind by an earlier demo run.
 DELETE FROM dbo.DocumentLine WHERE Comment LIKE N'demo:%';
@@ -49,10 +54,10 @@ PRINT '';
 
 SELECT
     ui.UserPrincipalName                 AS [User],
-    COUNT(gm.GroupObjectId)              AS [Write groups],
+    COUNT(gm.GroupObjectId)              AS [Group rows],
     CASE WHEN COUNT(gm.GroupObjectId) = 0
-         THEN N'can read everything, can write nothing'
-         ELSE N'can read everything, can write project 12345678'
+         THEN N'writes nothing, sees nothing if read filtering is on'
+         ELSE N'writes project 12345678, sees only it if read filtering is on'
     END                                  AS [Expected]
 FROM Security.UserIdentity AS ui
 LEFT JOIN Security.GroupMembership AS gm ON gm.UserObjectId = ui.UserObjectId

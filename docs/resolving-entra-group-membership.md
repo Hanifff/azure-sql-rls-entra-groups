@@ -1,35 +1,66 @@
 # Resolving Entra group membership inside Azure SQL
 
-A row references a Microsoft Entra security group, and the database has to decide whether
-the person writing that row is a member of it. Row-level security is the right mechanism
-for the decision, but the decision needs a fact the database does not have.
+A row references a Microsoft Entra security group, and the database has to determine
+whether the person writing that row is a member of it. Row-level security is the
+appropriate mechanism for that decision, but the decision depends on a fact the
+database does not hold.
 
 The constraint that shapes the work is that Azure SQL cannot query Entra during a
-statement. There is no mechanism for it. An RLS predicate is ordinary T-SQL, so it can
-only use what the database already holds. So the real question is not how to write the
-predicate, it is how group membership gets into the database before the query runs.
+statement. An RLS predicate is ordinary T-SQL and can only use what the database
+already holds. The question is therefore not how to write the predicate, but how
+group membership reaches the database before the query runs.
 
-We tested four ways.
+We implemented all four approaches against a live Azure SQL database and measured
+them.
 
-## The four options
+## What we tested
 
-| # | Option | Extra database principals | Works for any group | Freshness | Usable in an RLS predicate |
-| --- | --- | --- | --- | --- | --- |
-| 1 | Synced membership table | None | Yes | Sync interval you choose | Yes |
-| 2 | `IS_MEMBER` with a principal per group | One per group | Only registered groups | Connection open | Yes |
-| 3 | Identity passed by the application | None | Yes | Per request | Yes |
-| 4 | `sys.login_token` snapshot | None | Yes | Connection open | No |
+Azure SQL Basic tier at 5 DTU, the cheapest available. 100,000 rows across 2,000
+projects, 4,004 group IDs, a test user in 250 groups. Entra-only authentication,
+with the user's own token opening the connection.
 
-The deciding factors are how many database principals each option requires, and whether
-the predicate can actually reach the data.
+The implementation of option 1 carries seven enforcement tests that run on every
+deploy and fail it if the policy is not doing its job:
 
-Environment for the numbers below: Azure SQL Basic tier (5 DTU), 100,000 rows across
-2,000 projects, a test user in 250 groups, Entra-only authentication with the user's own
-token opening the connection.
+```
+PASS  1. A user in no groups still reads all 100002 lines.
+PASS  2. Member of the write group inserted into project 12345678.
+PASS  3. A user outside the write group was blocked from inserting.
+PASS  4. Write access to one project did not grant it on another.
+PASS  5. A row could not be moved into a project the user cannot write.
+PASS  6. Security schema is not directly readable by the app role.
+PASS  7. Deleting the membership row revoked write on the next statement.
+```
+
+Tests 5 and 7 cover the cases most often missed. Test 5 fails if the policy blocks
+only inserts, because a user could otherwise move an existing row into a project
+they do not hold. Test 7 confirms that revocation applies on the next statement,
+with no reconnect and no cache to clear.
+
+Only 4 of the 4,004 group IDs are real Entra groups; the remainder are generated
+GUIDs. The predicate compares GUIDs held in local tables and cannot distinguish
+between the two, so creating 4,000 real groups would not have changed the result. It
+would have taken approximately 2.8 hours at the 2,540 ms per group we measured.
+
+## The options
+
+Three ways to answer that question, and a fourth that changes who is asking.
+
+| # | Option | Where membership comes from | Extra database principals | Usable in an RLS predicate |
+| --- | --- | --- | --- | --- |
+| 1 | Synced membership table | a table a job keeps current | none | Yes |
+| 2 | `IS_MEMBER` with a principal per group | the login token, matched by name | one per group | Yes |
+| 3 | `sys.login_token` read directly | the login token, matched by object ID | none | No |
+| 4 | `SESSION_CONTEXT` | a table, as in option 1 | none | Yes |
+
+Options 1 to 3 are three answers to the same question: how does the database learn
+the caller's groups. Option 4 answers a different one: who is the caller. It is
+combined with option 1 rather than chosen instead of it, and it matters when the
+application connects on the user's behalf.
 
 ## Shared groundwork: the data model
 
-All four options sit on the same three tables.
+All four options sit on the same three business tables.
 
 ```
 Document       DocumentId, DocumentName
@@ -43,15 +74,19 @@ Reads are open and handled by table permissions, so only writes need row-level s
 What differs between the options is only the last hop: how the database establishes
 whether the caller is in the group that `ProjectAccess` names.
 
-## Option 1: Synced membership table
+---
+
+## Option 1: Synced membership table (implemented here)
 
 A scheduled job writes user-to-group membership into a table, and the predicate joins it.
+
+**How it works.** One row per user-to-group pair, keyed on Entra object IDs.
 
 ```
 Security.GroupMembership (UserObjectId, GroupObjectId)
 ```
 
-One row per user-to-group pair, keyed on Entra object IDs. The predicate walks:
+The predicate walks three hops, all of them local:
 
 ```
 row.ProjectId -> ProjectAccess.EntraIdWrite -> GroupMembership -> caller
@@ -79,13 +114,30 @@ row.ProjectId -> ProjectAccess.EntraIdWrite -> GroupMembership -> caller
 - A full table scan costs about two logical reads per row against the entitlement table,
   so whole-table aggregates should come from a summary table.
 
-## Option 2: `IS_MEMBER` with a principal per group
+**Two things the sync job has to get right.** It must read *transitive* membership,
+Graph's `getMemberObjects` rather than `memberOf`, or nested groups fail silently.
+And the merge must delete: it takes the user's complete current membership and
+removes what is no longer there, so offboarding needs no separate cleanup.
 
-The database answers the membership question natively. `IS_MEMBER` accepts a value from a
-column, so the group named on the row can be passed straight in.
+The interval is a revocation SLA, not a performance setting. Adding someone late is
+harmless; removing someone late is a security window. Note that option 2 has the
+same lag and less control over it: `IS_MEMBER` resolves at login and never
+refreshes, so with connection pooling a revoked user keeps access until the pool
+recycles that connection, at an interval nobody sets or measures.
 
-It only resolves groups that already exist as database principals, so every group that
-might appear on a row has to be registered first:
+**Use it when** groups number in the thousands or more and the user's own token opens the
+connection.
+
+---
+
+## Option 2: `IS_MEMBER` with a principal per group (small group sets)
+
+The database answers the membership question natively, at the cost of registering every
+group it might be asked about.
+
+**How it works.** `IS_MEMBER` accepts a value from a column, so the group named on the row
+can be passed straight in. It only resolves groups that already exist as database
+principals, so each one has to be created first:
 
 ```sql
 CREATE USER [project-4711-writers] FROM EXTERNAL PROVIDER;
@@ -113,92 +165,131 @@ CREATE USER [project-4711-writers] FROM EXTERNAL PROVIDER;
 - A sync job is still required, just a different one: something has to create and drop
   those principals as the directory changes.
 
-**Where it fits.** A small, stable set of groups. The mechanism is sound; it is the
+**Use it when** the set of groups is small and stable. The mechanism is sound; it is the
 group count that rules it out.
 
-## Option 3: Identity passed by the application
+---
 
-The application connects with a service account, validates the user's token itself, and
-tells the database who the caller is.
+## Option 3: `sys.login_token` read directly
+
+Azure SQL already knows the caller's groups at login and exposes them in a system
+view.
+
+**How it works.** `sys.login_token` lists every group the caller belongs to. We
+checked what it holds: 18 group entries for a test user, and every SID casts
+cleanly to the Entra object ID:
+
+```sql
+SELECT CAST(sid AS UNIQUEIDENTIFIER) AS oid, type, usage
+FROM sys.login_token WHERE type = 'WINDOWS GROUP';
+```
+
+```
+oid                                   type           usage
+2ED2D8F6-7699-420A-A090-9F4139F3B2E1  WINDOWS GROUP  DENY ONLY
+C3A6DB5E-DC48-47DD-994F-B856AEBD22E4  WINDOWS GROUP  DENY ONLY
+```
+
+Those are object IDs in exactly the form `ProjectAccess.EntraIdWrite` stores. No
+names, no registration, nothing to keep in step with the directory.
+
+**Pros**
+
+- No sync job and no staleness. The information is already in the session.
+- No database principal per group, unlike option 2.
+- Matches on object IDs, so group renames are irrelevant.
+- Outside RLS, in a stored procedure or an ordinary query, this is a better
+  membership check than `IS_MEMBER` and needs nothing set up.
+
+**Cons**
+
+- It cannot be used in an RLS predicate. Predicate functions must be schema-bound,
+  and schema binding forbids system objects:
+
+  ```
+  Cannot schema bind table valued function because it references
+  system object 'sys.login_token'.
+  ```
+
+- The workaround, copying the token into a real table at session start, keys on
+  `@@SPID`, which Azure SQL reuses after a disconnect. A session that fails to
+  clear and repopulate leaves the next caller holding the previous caller's groups.
+  That fails open.
+- Membership is fixed when the connection opens, so with pooling a revoked user
+  keeps access until the connection recycles.
+
+**Use it when** the check lives in a stored procedure rather than in row-level
+security. For RLS itself it is ruled out by one specific restriction, not by any
+weakness in the data it holds.
+
+---
+
+## Option 4: `SESSION_CONTEXT`, when the application connects
+
+This one is not an alternative to the first three. It changes how the database
+learns *who the caller is*, and is combined with option 1's table.
+
+**How it works.** The application connects with a service account, validates the
+user's token itself, and asserts the identity on the connection:
 
 ```sql
 EXEC sp_set_session_context 'UserObjectId', '<oid from the validated token>', @read_only = 1;
 ```
 
-The predicate then reads `SESSION_CONTEXT` instead of the connection identity. Membership
-still comes from a table, so this is Option 1 with a different identity anchor.
+The predicate reads `SESSION_CONTEXT` instead of `DATABASE_PRINCIPAL_ID()`. One
+line changes; the entitlement table and the sync job are identical.
 
 **Pros**
 
-- No per-user database principals either. One service account connects for everyone.
-- One connection pool for all users, rather than a pool per user, which matters at high
-  concurrency.
-- Sidesteps the 2,048 group login limit entirely, because the user never authenticates to
-  SQL.
+- No per-user database principals, so nothing to create as staff join and leave.
+- One connection pool for all users rather than a pool per user, which matters at
+  high concurrency.
+- The 2,048 group login limit does not apply, because the user never authenticates
+  to SQL.
+- Works when users reach the data through an application, which is the common case.
 
 **Cons**
 
-- The application becomes part of the security model. The database believes whatever it
-  is told, and a bug or an injection point becomes full impersonation of any user.
-- Every connection must set the context. A missed one is a silent security hole rather
-  than an error.
-- Session context persists on a pooled connection, so the reset path has to be correct.
+- The application becomes part of the security boundary. The database believes what
+  it is told, so a bug or an injection point becomes impersonation of any user.
+- Every connection must set the context. A missed one is a silent hole, not an
+  error.
+- Session context survives on a pooled connection, so the reset path has to be
+  right.
 - Nothing is auditable against the directory from the database side.
 
-**Where it fits.** When users reach the database through an application rather than with
-their own credentials, which is common, and the application is already inside the trust
-boundary.
+**Use it when** the application connects on the user's behalf. If the user's own
+token opens the connection, `DATABASE_PRINCIPAL_ID()` is stronger and free.
 
-## Option 4: `sys.login_token` snapshot
+---
 
-Azure SQL already knows the caller's groups at login. `sys.login_token` lists them.
+## What option 1 costs to run
 
-We checked what it contains: 16 entries, 15 of them Entra groups, and only one an actual
-database principal. So group membership is genuinely present without anyone running
-`CREATE USER`.
+Measured on the environment above, with the test user seeing 12,500 of 100,000 rows.
 
-Two things stop it being the answer.
+| Query | Reads on the data table | Reads on the entitlement tables | Elapsed |
+| --- | --- | --- | --- |
+| Paged list, `TOP 50` | 6 | 100 | 0 ms |
+| Single row by primary key | 3 | 2 | 0 ms |
+| `COUNT(*)` over everything visible | 1,314 | 200,000 | 4,247 ms |
 
-It stores SIDs, not names:
+The first two are the queries an API typically issues. The predicate is effectively
+free at that shape, because the clustered key turns the check into a seek.
 
-```
-name                                                   type
-S-1-9-3-0x2462162104615311810661601441596557243178225  WINDOWS GROUP
-```
+The third row is the one to plan around. The predicate is evaluated per candidate
+row, so a full scan costs roughly two logical reads per row against the entitlement
+table. A security predicate remains a join even though it does not appear in the
+query text, and whole-table aggregates are better served from a summary table.
 
-That is precisely why `IS_MEMBER` needs the `CREATE USER` step. The principal supplies the
-name-to-SID mapping. Matching on object IDs avoids needing it at all.
-
-And it cannot appear in a predicate. RLS predicate functions must be schema-bound, and
-schema binding forbids system objects:
-
-```
-Cannot schema bind table valued function because it references
-system object 'sys.login_token'.
-```
-
-**Pros**
-
-- No principals, no sync, no staleness. The information is already there.
-- Outside RLS, in a stored procedure or an ordinary query, it is a better replacement for
-  `IS_MEMBER` than `IS_MEMBER` is, because it works on SIDs and needs no registration.
-
-**Cons**
-
-- Unusable in an RLS predicate, which is the one place this problem needs solving.
-- The workaround is to copy the token into a real table at session start and read that.
-  It works, but it keys on `@@SPID`, which Azure SQL reuses after a disconnect. A session
-  that fails to clear and repopulate leaves the next caller holding the previous caller's
-  groups. That fails open.
-- Requires the application to run the copy on every connection, so a missed one is again
-  silent.
-
-**Where it fits.** Authorization checks in stored procedures rather than row-level
-security.
+For comparison, the setup cost of option 2: `CREATE USER ... FROM EXTERNAL PROVIDER`
+measured at 90 ms, so registering 100,000 groups is approximately 2.5 hours per
+database. That cost recurs for every database and does not end, since the directory
+continues to change.
 
 ## Limits that apply regardless
 
-All three are per user and unaffected by how many groups exist in the tenant.
+All three limits are per user, and none is affected by how many groups exist in the
+tenant.
 
 | Limit | Value | Effect |
 | --- | --- | --- |
@@ -206,42 +297,64 @@ All three are per user and unaffected by how many groups exist in the tenant.
 | Entra membership | 7,000 groups | Cannot be added to more groups |
 | JWT `groups` claim | 200 groups | Claim omitted, overage claim returned instead |
 
-The JWT limit does not apply to any of these. Azure SQL resolves group membership itself
-at login and does not read the `groups` claim from the token.
+The JWT limit does not apply to any of these options. Azure SQL resolves group
+membership itself at login and does not read the `groups` claim from the token.
 
-The 2,048 limit is a login constraint rather than an authorization one. If a user exceeds
-it, the fix is Option 3, not a change to how rows are filtered. A membership table holds
-any number of groups per user without difficulty.
+The 2,048 limit is a login constraint rather than an authorization one. A user who
+exceeds it is addressed by option 4, not by changing how rows are filtered. A
+membership table holds any number of groups per user without difficulty.
 
 ## Which one to pick
 
-- **Groups numbering in the thousands or more, and the user's own token opens the
-  connection: Option 1.** The only cost is a sync job, and one is needed for Option 2
-  anyway.
-- **A small, stable set of groups: Option 2.** Fewer moving parts, and the principal count
-  stays manageable.
-- **Users reach the database through an application on a shared service account, or
-  connection concurrency is high, or anyone is near 2,048 groups: Option 3**, with Option
-  1's table behind it.
-- **Authorization in stored procedures rather than row-level security: Option 4.**
+- Groups in the thousands or more, user's own token opens the connection: **option 1**.
+  The only cost is a sync job, and option 2 needs one anyway.
+- A small, stable set of groups: **option 2**. Fewer moving parts.
+- The check sits in a stored procedure rather than in RLS: **option 3**. It is the
+  cleanest membership read available and needs no setup at all.
+- The application connects on the user's behalf, or concurrency is high, or anyone
+  is near 2,048 groups: **option 4**, with option 1's table behind it.
 
-Options 1 and 3 are not really alternatives to each other. They share the same entitlement
-table and differ only in where the caller's identity comes from, so moving between them is
-a one-line change to the predicate.
+## Conclusion
 
-## Takeaway
+The difficulty in this problem is not row-level security itself. A predicate is
+ordinary T-SQL and can only use facts the database already holds, and no database
+can call an identity provider in the middle of a statement. Each option is therefore
+a way of making membership available in advance.
 
-Row-level security is not the hard part. Predicates are ordinary T-SQL and can only use
-facts the database already holds, and no database can call an identity provider in the
-middle of a statement. Every option is a variation on getting membership in ahead of time.
+The three membership options succeed or fail for different reasons, and none of them
+for lack of data. Option 2 holds the data but reaches it by display name, which
+requires a database principal per group and breaks silently when a group is renamed.
+Option 3 holds the data in the ideal form, object IDs, and is prevented from use
+only by schema binding. Option 1 places those same object IDs in an ordinary table,
+where a predicate can seek on them, at the cost of a job that keeps it current.
 
-The choice comes down to what you are willing to maintain. `IS_MEMBER` looks like it
-avoids a sync job but does not, because something still has to create and drop a database
-principal for every group in the directory. A two-column table needs the same sync and
-none of the schema churn.
+Three observations apply beyond this comparison.
 
-## Try it yourself
+**Identity taken from the connection is stronger than identity asserted by the
+application.** When the user's own token opens the connection, the application sits
+outside the security boundary. This is what distinguishes option 4 from the others,
+and why it is better treated as a fallback than a default.
 
-A working implementation, with the enforcement tests and the benchmark that produced these
-numbers, is in the repository:
+**Reads and writes are separate decisions.** A FILTER predicate governs visibility
+and a BLOCK predicate governs modification, and nothing requires the two to agree. A
+user granted write access to a project they cannot read will insert rows they cannot
+subsequently see. Whether that is desirable is worth deciding explicitly.
+
+**A group count in six figures is worth examining.** It can indicate that the
+directory is being used to store per-object permissions. Entra groups are designed
+for organisational membership, with governance, access reviews and lifecycle
+attached, and those features carry overhead that per-object entitlements do not
+need. One established middle ground is a smaller number of groups for organisational
+roles, with fine-grained permissions modelled as data.
+
+Two questions determine the rest. Does the user's own token open the connection, or
+does an application connect on their behalf? That decides between
+`DATABASE_PRINCIPAL_ID()` and option 4. And how quickly must removal from a group
+withdraw access? That sets the sync interval. Both are worth settling before
+implementation begins.
+
+## Reference implementation
+
+A working implementation, including the enforcement tests and the benchmark that
+produced these figures, is available at
 [Hanifff/azure-sql-rls-entra-groups](https://github.com/Hanifff/azure-sql-rls-entra-groups).

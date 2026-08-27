@@ -10,6 +10,9 @@
 --   GroupMembership which users are in which groups. This is the piece that is
 --                   usually missing, and the reason the database cannot answer
 --                   the membership question on its own.
+--   UserIdentity    database principal -> Entra object ID, because a
+--                   schema-bound predicate cannot read sys.database_principals.
+--   SyncState       when each sync last ran, so staleness is observable.
 --
 -- Note the shape: the group is reached through the project rather than stored
 -- on the row, so the predicate joins instead of comparing a column.
@@ -35,8 +38,8 @@ END
 GO
 
 -- ----------------------------------------------------------------------------
--- Project to group mapping. In their environment this is written by the IAM
--- sync. Here it is seeded, and the sync script updates it the same way.
+-- Project to group mapping. This can be written by an IAM
+-- sync or with Graph API. Here it is seeded, and the sync script updates it the same way.
 --
 -- Groups are stored as object IDs. If the source system supplies display names
 -- instead, this column changes type and IS_MEMBER becomes an option; see
@@ -123,6 +126,24 @@ BEGIN
         ON Security.UserIdentity (UserObjectId);
 
     PRINT '  Created Security.UserIdentity';
+END
+GO
+
+-- ----------------------------------------------------------------------------
+-- Sync bookkeeping. Makes staleness observable: a job that silently stops
+-- looks exactly like one that is working until someone keeps access too long.
+-- DeltaLink carries the Graph delta token once the sync uses one.
+-- ----------------------------------------------------------------------------
+IF OBJECT_ID('Security.SyncState', 'U') IS NULL
+BEGIN
+    CREATE TABLE Security.SyncState (
+        SyncName      NVARCHAR(64)  NOT NULL CONSTRAINT PK_SyncState PRIMARY KEY,
+        DeltaLink     NVARCHAR(MAX) NULL,
+        LastRunAt     DATETIME2(3)  NULL,
+        LastRunStatus NVARCHAR(32)  NULL,
+        RowsChanged   INT           NULL
+    );
+    PRINT '  Created Security.SyncState';
 END
 GO
 

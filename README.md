@@ -52,7 +52,7 @@ cd infra
 
 A couple of minutes. It shows what it will create and asks before creating it.
 
-The run ends with 19 verification checks and 5 enforcement tests. If either
+The run ends with 19 verification checks and 7 enforcement tests. If either
 fails, the deployment fails.
 
 ### 3. Run the demo
@@ -61,24 +61,96 @@ fails, the deployment fails.
 ./demo.sh
 ```
 
-Prints who can read and write what, then runs the enforcement tests.
+Resets the data, waits for Enter, then prints eight steps. It handles the access
+token, the configuration and the firewall itself, including adding your current IP
+if it has changed and re-enabling public network access if a policy switched it off.
+
+The setup: anna is in the write and read groups for project 12345678. bjorn is in
+no groups. Both are ordinary database users with no special rights, and nothing else
+differs between them.
+
+| Step | Who does what | Result |
+| --- | --- | --- |
+| 1 | Show `ProjectAccess` and `DocumentLine` | Project 12345678 maps to a write group. Rows carry a `ProjectId`, not a group. |
+| 2 | anna and bjorn each `SELECT` | Both see all 100,002 rows. Reads are open, handled by table permissions. |
+| 3 | anna inserts into project 12345678 | Allowed. `Security.GroupMembership` has her in that project's write group. |
+| 4 | bjorn runs the identical insert | Blocked. He has no row in `GroupMembership`. |
+| 5 | anna inserts into project 98765432 | Blocked. Her membership covers one project, not the other. |
+| 6 | anna updates her own row to point at project 98765432 | Blocked. A FILTER predicate alone would miss this. |
+| 7 | Delete anna's rows from `GroupMembership`, she retries step 3 | Blocked. Revocation applies on the next statement, with no reconnect. |
+| 8 | Restore and clean up | Back to the starting state, safe to run again. |
+
+Steps 6 and 7 are the ones people have not usually considered.
+
+Every block traces to one table. Remove the row from `GroupMembership` and access
+disappears; put it back and it returns. Nothing else in the system changes.
+
+### Reads and writes together
+
+Reads are open by default, which is why step 2 shows both users seeing everything.
+A second story switches read filtering on and shows both predicates at once:
+
+```bash
+./demo.sh readwrite
+```
+
+| Step | Shows |
+| --- | --- |
+| 1 | One FILTER and four BLOCK predicates now bound |
+| 2 | anna sees 1 row, bjorn sees 0, table holds 100,002 |
+| 3 | anna writes to a project she can read, and sees the row afterwards |
+| 4 | anna is blocked on a project she can neither read nor write |
+| 5 | Write access without read access |
+| 6 | bjorn sees nothing and writes nothing |
+| 7 | Restores everything, including read filtering off |
+
+Step 5 is worth pausing on. anna is added to the write group of a project but not
+its read group, then inserts a row:
 
 ```
-User                Groups  Readable  Writable
-------------------  ------  --------  --------
-admin                  253     12600        50
-demo-readwrite           2        50        50
-demo-readonly            1        50         0
-
-PASS  1. Alice sees 50 of 100000 rows (only her group).
-PASS  2. Bob has no memberships and sees 0 rows.
-PASS  3. BLOCK predicate stopped a write on a read-only row.
-PASS  4. Security schema is not directly readable by the app role.
-PASS  5. Deleting the membership row revoked access immediately.
+  rows anna can see in project 98765432 : 0
+  rows actually there                   : 2
 ```
 
-The row to point at is `demo-readonly`: 50 rows readable, none writable. Same
-table, same query, same application code.
+She wrote a row she cannot read back. FILTER governs reads, BLOCK governs writes,
+and nothing requires them to agree.
+
+For the same comparison as a table rather than a narrative:
+
+```bash
+./demo.sh compare
+```
+
+```
+Read filtering  User   Rows visible  Write 12345678  Write 98765432
+read OFF        anna   100002        yes             no
+read OFF        bjorn  100002        no              no
+read ON         anna   1             yes             no
+read ON         bjorn  0             no              no
+```
+
+### Running it at your own pace
+
+Both stories can be driven one step at a time, so you can pause and explain.
+
+```bash
+./demo.sh reset
+./demo.sh tables     # the five tables and how they connect
+./demo.sh access     # who is entitled to what
+./demo.sh who anna   # her groups, her projects, and what she cannot reach
+./demo.sh step 3     # anna writes, allowed
+./demo.sh step 4     # bjorn, identical statement, blocked
+./demo.sh step 6     # anna cannot move her own row
+./demo.sh step 7     # delete one membership row, access gone
+./demo.sh step 8     # restore
+```
+
+`./demo.sh rwstep 1` to `7` walks the read plus write story the same way. Run
+`rwstep 1` first, since it binds the FILTER predicate, and finish with `rwstep 7`.
+
+In `./demo.sh tables`, anna's rows in `GroupMembership` carry the same GUIDs as the
+write and read groups on project 12345678 in `ProjectAccess`, so the whole chain can
+be traced before anything runs.
 
 ### 4. Optional, add the APIs and gateway
 
@@ -122,9 +194,19 @@ rebuilds the same environment under the same names.
 
 | Command | Shows |
 | --- | --- |
-| `./demo.sh access` | who can read and write what |
-| `./demo.sh tests` | the five enforcement tests |
+| `./demo.sh tables` | all five tables, for opening the demo |
+| `./demo.sh access` | who is entitled to read and write what |
+| `./demo.sh who anna` | one user in full, with the project mapping |
+| `./demo.sh compare` | read and write, both users, both modes, one table |
+| `./demo.sh step N` | one step of the write story, 1 to 8 |
+| `./demo.sh rwstep N` | one step of the read plus write story, 1 to 7 |
+| `./demo.sh story` | run the write story again without resetting |
+| `./demo.sh readwrite` | the read plus write story |
+| `./demo.sh tests` | the seven enforcement tests |
 | `./demo.sh bench` | logical reads and timings |
+| `./demo.sh read on` | switch read filtering on |
+| `./demo.sh read off` | switch it back off, the default |
+| `./demo.sh policy` | print the predicate and policy |
 | `./sync-membership.sh` | sync the signed-in user's group membership |
 | `./sync-membership.sh --all` | sync every registered user |
 
@@ -299,14 +381,18 @@ user inherit a deleted user's entitlements. The Entra object ID is the safer key
 Azure SQL cannot query Entra during a statement, so membership has to already be in
 the database. There are four ways to get it there.
 
-| # | Option | Principals per group | Any group | Freshness | Usable in a predicate |
-| --- | --- | --- | --- | --- | --- |
-| 1 | Synced membership table | None | Yes | Sync interval | Yes |
-| 2 | `IS_MEMBER` with a principal per group | One each | Registered only | Connection open | Yes |
-| 3 | Identity passed by the application | None | Yes | Per request | Yes |
-| 4 | `sys.login_token` snapshot | None | Yes | Connection open | No |
+| # | Option | Principals per group | Any group | Usable in a predicate |
+| --- | --- | --- | --- | --- |
+| 1 | Synced membership table | None | Yes | Yes |
+| 2 | `IS_MEMBER` with a principal per group | One each | Registered only | Yes |
+| 3 | `sys.login_token` read directly | None | Yes | No |
+| 4 | `SESSION_CONTEXT` | None | Yes | Yes |
 
-This repository implements option 1. Full pros and cons, with measured numbers, are in
+Options 1 to 3 answer how the database learns the caller's groups. Option 4 answers
+who the caller is, and is combined with option 1 rather than chosen instead of it.
+
+This repository implements option 1. Pros and cons for each, with measured numbers,
+are in
 [docs/resolving-entra-group-membership.md](docs/resolving-entra-group-membership.md).
 
 ### Why not `IS_MEMBER()`
@@ -449,17 +535,25 @@ infra/
   sync-membership.sh       Membership sync
   sqlrunner/               Runs .sql files with an Entra token, replaces sqlcmd
   sql/
-    01_schema.sql          Business table and the entitlement tables
-    02_rls_policy.sql      Predicate, policy, app role, dbo.vw_MyAccess
+    01_schema.sql          Business tables and the entitlement tables
+    02_policy.sql          Predicates, policy, app role, dbo.vw_MyAccess
     03_procedures.sql      Procedures the sync job calls
-    04_seed_demo_data.sql  Demo data, size set by setup.sh
+    04_seed.sql            Demo data, size set by setup.sh
     05_verify.sql          19 post-deployment assertions
-    06_test_rls.sql        5 enforcement tests
+    06_test.sql            7 enforcement tests
     07_benchmark.sql       Logical reads and timings
-    08_show_access.sql     Who can see what
+    08_show_access.sql     Who is entitled to what
+    09_toggle_read.sql     Switch read filtering on or off
+    10_demo_setup.sql      Creates the demo users
+    11_demo_run.sql        The eight-step write demo
+    12_who.sql             One user, in full
+    13_compare_modes.sql   Both read modes side by side
+    14_demo_readwrite.sql  The seven-step read plus write demo
 graphql-server/            Azure Function, GraphQL via HotChocolate
 rest-api/                  Azure Function, REST
 api-test-ui/               Browser client
+docs/
+  resolving-entra-group-membership.md   The options, with pros and cons
 ```
 
 ### Naming and tags

@@ -32,20 +32,37 @@ PRINT '';
 GO
 
 PRINT '============================================================';
-PRINT ' STEP 2  Reads are open to everyone';
+PRINT ' STEP 2  What each user can read';
 PRINT '============================================================';
 GO
 
-DECLARE @total INT, @anna INT, @bjorn INT;
+DECLARE @total INT, @anna INT, @bjorn INT, @filtered BIT;
 SELECT @total = COUNT(*) FROM dbo.DocumentLine;
 EXECUTE AS USER = 'anna';  SELECT @anna  = COUNT(*) FROM dbo.DocumentLine; REVERT;
 EXECUTE AS USER = 'bjorn'; SELECT @bjorn = COUNT(*) FROM dbo.DocumentLine; REVERT;
+
+SELECT @filtered = CASE WHEN EXISTS (
+    SELECT 1 FROM sys.security_predicates AS sp
+    JOIN sys.security_policies AS p ON p.object_id = sp.object_id
+    WHERE p.name = 'ProjectLinePolicy' AND sp.predicate_type_desc = 'FILTER'
+) THEN 1 ELSE 0 END;
 
 PRINT CONCAT('  total lines : ', @total);
 PRINT CONCAT('  anna sees   : ', @anna);
 PRINT CONCAT('  bjorn sees  : ', @bjorn);
 PRINT '';
-PRINT '  Read is handled by RBAC on the table, so no FILTER predicate.';
+IF @filtered = 0
+BEGIN
+    PRINT '  Read filtering is OFF, the default. Reads are handled by table';
+    PRINT '  permissions, so there is no FILTER predicate and both see everything.';
+    PRINT '  Only writes are restricted. That is the rest of this demo.';
+END
+ELSE
+BEGIN
+    PRINT '  Read filtering is ON. A FILTER predicate is bound, so each user sees';
+    PRINT '  only projects they belong to. Bjorn is in no groups, so he sees none.';
+    PRINT '  Same table, same query, no WHERE clause anywhere.';
+END
 PRINT '';
 GO
 
@@ -160,9 +177,14 @@ GO
 
 DECLARE @annaOid UNIQUEIDENTIFIER = '0a0a0a0a-0000-0000-0000-00000000000a';
 DECLARE @p1Write UNIQUEIDENTIFIER = (SELECT EntraIdWrite FROM dbo.ProjectAccess WHERE ProjectId = 12345678);
+DECLARE @p1Read  UNIQUEIDENTIFIER = (SELECT EntraIdRead  FROM dbo.ProjectAccess WHERE ProjectId = 12345678);
 
-IF NOT EXISTS (SELECT 1 FROM Security.GroupMembership WHERE UserObjectId = @annaOid)
+-- Step 7 removed every row for anna, so both go back, not just the write one.
+IF NOT EXISTS (SELECT 1 FROM Security.GroupMembership WHERE UserObjectId = @annaOid AND GroupObjectId = @p1Write)
     INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES (@annaOid, @p1Write);
+
+IF NOT EXISTS (SELECT 1 FROM Security.GroupMembership WHERE UserObjectId = @annaOid AND GroupObjectId = @p1Read)
+    INSERT INTO Security.GroupMembership (UserObjectId, GroupObjectId) VALUES (@annaOid, @p1Read);
 
 DELETE FROM dbo.DocumentLine WHERE Comment LIKE N'demo:%';
 

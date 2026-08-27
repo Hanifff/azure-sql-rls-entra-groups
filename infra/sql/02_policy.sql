@@ -53,8 +53,9 @@ RETURN
               AND ui.DatabasePrincipalId = DATABASE_PRINCIPAL_ID()
               AND ui.IsActive = 1
         )
-        -- IS_MEMBER always returns 0 for dbo, so the Entra admin needs its own
-        -- bypass for seeding and operations.
+        -- Bypass so the deployer can seed and operate. 'db_owner' is a fixed
+        -- database role, not an Entra group, so this IS_MEMBER call needs no
+        -- external principal. Members can disable the policy anyway.
         OR USER_NAME() = 'dbo'
         OR IS_MEMBER('db_owner') = 1;
 GO
