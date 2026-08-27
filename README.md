@@ -153,7 +153,16 @@ be traced before anything runs.
 
 The database and `./demo.sh` are enough to show row-level security. To show the
 whole path, from a signed-in user through a gateway and an API into the database,
-deploy everything:
+deploy more of the stack.
+
+`deploy.sh` has four modes, all idempotent and re-runnable:
+
+| Command | Creates | Takes |
+| --- | --- | --- |
+| `./deploy.sh --sql-only` | SQL server, database, Entra groups, schema, policy, data | a few minutes |
+| `./deploy.sh --skip-apim` | the above plus storage, plan, Insights, both Function Apps | a few minutes |
+| `./deploy.sh` | everything, including API Management | 30 to 45 minutes |
+| `./deploy.sh --only-apim` | APIM plus its APIs and policy, against an existing deployment | 30 to 45 minutes |
 
 ```bash
 ./deploy.sh
@@ -162,6 +171,7 @@ deploy everything:
 Adds storage, an App Service plan, Application Insights, both Function Apps and API
 Management. **APIM takes 30 to 45 minutes to provision on first create** and is by
 far the most expensive resource, so start it early and tear it down afterwards.
+`--skip-apim` gives you the Function Apps without it.
 
 ```bash
 source ./config.sh
