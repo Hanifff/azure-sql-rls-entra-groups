@@ -12,9 +12,6 @@
 > obligations, availability targets or scale. Treat it as a starting point for a
 > design discussion, not as something to deploy and rely on. Adapting, hardening
 > and testing it for your own environment is your responsibility.
->
-> The options, with pros and cons for each, are in
-> [docs/resolving-entra-group-membership.md](docs/resolving-entra-group-membership.md).
 
 Rows reference a Microsoft Entra security group. The database decides who may read
 and write each row, not the application.
@@ -400,9 +397,8 @@ the database. There are four ways to get it there.
 Options 1 to 3 answer how the database learns the caller's groups. Option 4 answers
 who the caller is, and is combined with option 1 rather than chosen instead of it.
 
-This repository implements option 1. Pros and cons for each, with measured numbers,
-are in
-[docs/resolving-entra-group-membership.md](docs/resolving-entra-group-membership.md).
+This repository implements option 1. The sections below cover why, and the
+trade-offs behind each of the others.
 
 ### Why not `IS_MEMBER()`
 
@@ -561,8 +557,6 @@ infra/
 graphql-server/            Azure Function, GraphQL via HotChocolate
 rest-api/                  Azure Function, REST
 api-test-ui/               Browser client
-docs/
-  resolving-entra-group-membership.md   The options, with pros and cons
 ```
 
 ### Naming and tags
